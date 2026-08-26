@@ -109,14 +109,20 @@
   cursor: pointer;
 }
 
+/* Keep the emulator document in the viewport so browsers do not throttle its
+   WebGL/canvas work as aggressively as a far-off-screen iframe. It is rendered
+   at full internal size but visually reduced to a sub-pixel footprint. */
 .emulator-engine-frame {
   position: fixed;
-  left: -10000px;
+  left: 0;
   top: 0;
+  z-index: -1;
   width: 256px;
   height: 384px;
   border: 0;
-  opacity: .001;
+  opacity: .01;
+  transform: scale(.001);
+  transform-origin: 0 0;
   pointer-events: none;
 }
 
