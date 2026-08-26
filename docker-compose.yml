@@ -1,0 +1,9 @@
+services:
+  nds:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nds
+    restart: unless-stopped
+    ports:
+      - "${NDS_PORT:-8092}:80"
