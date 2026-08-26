@@ -20,7 +20,7 @@ function cleanAscii(bytes: Uint8Array) {
     .trim()
 }
 
-async function readNdsMetadata(file: File): Promise<NdsRomMetadata> {
+export async function readNdsMetadata(file: File): Promise<NdsRomMetadata> {
   const header = new Uint8Array(await file.slice(0, 0x20).arrayBuffer())
 
   return {
@@ -32,9 +32,50 @@ async function readNdsMetadata(file: File): Promise<NdsRomMetadata> {
   }
 }
 
-function findLargestCanvas(document: Document) {
+function findGameCanvas(document: Document) {
   const canvases = Array.from(document.querySelectorAll('canvas'))
-  return canvases.sort((a, b) => b.width * b.height - a.width * a.height)[0] ?? null
+    .filter((canvas) => canvas.width > 1 && canvas.height > 1)
+
+  if (!canvases.length) return null
+
+  const dsLike = canvases
+    .filter((canvas) => {
+      const ratio = canvas.width / canvas.height
+      return ratio > 0.55 && ratio < 0.8
+    })
+    .sort((a, b) => b.width * b.height - a.width * a.height)
+
+  return dsLike[0] ?? canvases.sort((a, b) => b.width * b.height - a.width * a.height)[0] ?? null
+}
+
+function hasMeaningfulFrame(canvas: HTMLCanvasElement) {
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context || canvas.width < 8 || canvas.height < 8) return false
+
+  const width = canvas.width
+  const height = canvas.height
+  const points = [
+    [0.1, 0.1],
+    [0.5, 0.1],
+    [0.9, 0.1],
+    [0.25, 0.5],
+    [0.5, 0.5],
+    [0.75, 0.5],
+    [0.1, 0.9],
+    [0.5, 0.9],
+    [0.9, 0.9],
+  ]
+
+  const samples = points.map(([x, y]) => {
+    const px = Math.min(width - 1, Math.max(0, Math.floor(width * x)))
+    const py = Math.min(height - 1, Math.max(0, Math.floor(height * y)))
+    return Array.from(context.getImageData(px, py, 1, 1).data)
+  })
+
+  const first = samples[0]
+  return samples.some((sample) =>
+    sample.some((channel, index) => Math.abs(channel - first[index]) > 10),
+  )
 }
 
 export function useNdsRomEmulator(file: File | null) {
@@ -43,93 +84,169 @@ export function useNdsRomEmulator(file: File | null) {
   const bottomCanvasRef = useRef<HTMLCanvasElement>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const animationFrameRef = useRef<number | null>(null)
-  const [romUrl, setRomUrl] = useState<string | null>(null)
   const [status, setStatus] = useState<EmulatorStatus>('idle')
+  const [stage, setStage] = useState('Selecciona una ROM .nds')
   const [error, setError] = useState<string | null>(null)
   const [metadata, setMetadata] = useState<NdsRomMetadata | null>(null)
 
-  useEffect(() => {
-    sourceCanvasRef.current = null
-    setError(null)
-    setMetadata(null)
+  const romToken = useMemo(
+    () => file ? `${encodeURIComponent(file.name)}:${file.size}:${file.lastModified}` : 'empty',
+    [file],
+  )
 
-    if (!file) {
-      setRomUrl(null)
-      setStatus('idle')
-      return
-    }
-
-    setStatus('loading')
-    const url = URL.createObjectURL(file)
-    setRomUrl(url)
-
-    readNdsMetadata(file)
-      .then(setMetadata)
-      .catch(() => setMetadata(null))
-
-    return () => URL.revokeObjectURL(url)
-  }, [file])
-
-  const srcDoc = useMemo(() => {
-    if (!romUrl || !file) return ''
-
-    const gameUrl = JSON.stringify(romUrl)
-    const gameName = JSON.stringify(file.name.replace(/\.nds$/i, ''))
-
-    return `<!doctype html>
+  const srcDoc = useMemo(() => `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    html, body, #game { margin: 0; width: 256px; height: 384px; overflow: hidden; background: #000; }
-    body { position: relative; }
+    html, body { margin: 0; width: 256px; height: 384px; overflow: hidden; background: #000; }
+    #game { width: 256px; height: 384px; overflow: hidden; background: #000; }
+    canvas { image-rendering: pixelated; }
   </style>
 </head>
-<body>
+<body data-rom-token="${romToken}">
   <div id="game"></div>
-  <script>
-    window.EJS_player = '#game';
-    window.EJS_core = 'desmume';
-    window.EJS_gameUrl = ${gameUrl};
-    window.EJS_gameName = ${gameName};
-    window.EJS_pathtodata = '${EJS_DATA_PATH}';
-    window.EJS_startOnLoaded = true;
-    window.EJS_threads = false;
-    window.EJS_volume = 0.7;
-    window.EJS_language = 'es-ES';
-  <\/script>
-  <script src="${EJS_DATA_PATH}loader.js"><\/script>
 </body>
-</html>`
-  }, [file, romUrl])
+</html>`, [romToken])
 
   useEffect(() => {
-    if (!romUrl) return
+    sourceCanvasRef.current = null
+    setError(null)
+
+    if (!file) {
+      setMetadata(null)
+      setStatus('idle')
+      setStage('Selecciona una ROM .nds')
+      return
+    }
+
+    setStatus('loading')
+    setStage('Leyendo cabecera de la Game Card…')
+
+    readNdsMetadata(file)
+      .then(setMetadata)
+      .catch(() => setMetadata(null))
+  }, [file])
+
+  useEffect(() => {
+    if (!file) return
 
     let disposed = false
-    let attempts = 0
+    let bootAttempts = 0
+    let canvasAttempts = 0
+    let firstCanvasAt = 0
+    let loaderInjected = false
+    let childErrorHandler: ((event: ErrorEvent) => void) | null = null
+    let rejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null
 
-    const locateCanvas = window.setInterval(() => {
-      if (disposed) return
-      attempts += 1
+    const bootInterval = window.setInterval(() => {
+      if (disposed || loaderInjected) return
+      bootAttempts += 1
+
+      const frame = iframeRef.current
+      const frameWindow = frame?.contentWindow
+      const frameDocument = frame?.contentDocument
+
+      if (!frameWindow || !frameDocument?.body) {
+        if (bootAttempts > 100) {
+          setStatus('error')
+          setError('No se pudo inicializar el contenedor del emulador.')
+          setStage('Error al crear el motor')
+          window.clearInterval(bootInterval)
+        }
+        return
+      }
+
+      if (frameDocument.body.dataset.romToken !== romToken) return
+
+      loaderInjected = true
+      window.clearInterval(bootInterval)
+      setStage('Cargando EmulatorJS y el core Nintendo DS…')
+
+      childErrorHandler = (event: ErrorEvent) => {
+        if (disposed) return
+        setStatus('error')
+        setError(event.message || 'Error JavaScript dentro del emulador.')
+        setStage('El motor ha devuelto un error')
+      }
+
+      rejectionHandler = (event: PromiseRejectionEvent) => {
+        if (disposed) return
+        const reason = event.reason
+        const message = reason instanceof Error ? reason.message : String(reason ?? 'Error desconocido')
+        setStatus('error')
+        setError(message)
+        setStage('El motor no ha podido arrancar')
+      }
+
+      frameWindow.addEventListener('error', childErrorHandler)
+      frameWindow.addEventListener('unhandledrejection', rejectionHandler)
+
+      const ejsWindow = frameWindow as Window & {
+        EJS_player?: string
+        EJS_gameName?: string
+        EJS_biosUrl?: string
+        EJS_gameUrl?: File | string
+        EJS_core?: string
+        EJS_pathtodata?: string
+        EJS_startOnLoaded?: boolean
+        EJS_threads?: boolean
+        EJS_volume?: number
+        EJS_language?: string
+        EJS_ready?: () => void
+      }
+
+      ejsWindow.EJS_player = '#game'
+      ejsWindow.EJS_gameName = file.name.replace(/\.nds$/i, '')
+      ejsWindow.EJS_biosUrl = ''
+      ejsWindow.EJS_gameUrl = file
+      ejsWindow.EJS_core = 'nds'
+      ejsWindow.EJS_pathtodata = EJS_DATA_PATH
+      ejsWindow.EJS_startOnLoaded = true
+      ejsWindow.EJS_threads = false
+      ejsWindow.EJS_volume = 0.75
+      ejsWindow.EJS_language = 'es-ES'
+      ejsWindow.EJS_ready = () => {
+        if (!disposed) setStage('Core listo. Iniciando la Game Card…')
+      }
+
+      const loader = frameDocument.createElement('script')
+      loader.src = `${EJS_DATA_PATH}loader.js`
+      loader.async = true
+      loader.onerror = () => {
+        if (disposed) return
+        setStatus('error')
+        setError('No se pudo descargar loader.js desde el CDN de EmulatorJS.')
+        setStage('Error descargando EmulatorJS')
+      }
+      frameDocument.body.appendChild(loader)
+    }, 50)
+
+    const canvasInterval = window.setInterval(() => {
+      if (disposed || !loaderInjected) return
+      canvasAttempts += 1
 
       try {
-        const iframeDocument = iframeRef.current?.contentDocument
-        if (!iframeDocument) return
+        const frameDocument = iframeRef.current?.contentDocument
+        if (!frameDocument) return
 
-        const source = findLargestCanvas(iframeDocument)
-        if (!source || source.width < 2 || source.height < 2) {
-          if (attempts > 200) {
+        const source = findGameCanvas(frameDocument)
+        if (!source) {
+          if (canvasAttempts > 400) {
             setStatus('error')
-            setError('El emulador no ha creado el framebuffer. Revisa la consola del navegador.')
-            window.clearInterval(locateCanvas)
+            setError('El core Nintendo DS no llegó a crear su framebuffer.')
+            setStage('No se ha recibido imagen del emulador')
+            window.clearInterval(canvasInterval)
           }
           return
         }
 
         sourceCanvasRef.current = source
-        window.clearInterval(locateCanvas)
+        if (!firstCanvasAt) {
+          firstCanvasAt = performance.now()
+          setStage('Framebuffer detectado. Esperando vídeo…')
+        }
 
         const draw = () => {
           if (disposed) return
@@ -142,17 +259,18 @@ export function useNdsRomEmulator(file: File | null) {
             const splitY = Math.floor(currentSource.height / 2)
             const bottomHeight = currentSource.height - splitY
 
-            topCanvas.width = 256
-            topCanvas.height = 192
-            bottomCanvas.width = 256
-            bottomCanvas.height = 192
+            if (topCanvas.width !== 256) topCanvas.width = 256
+            if (topCanvas.height !== 192) topCanvas.height = 192
+            if (bottomCanvas.width !== 256) bottomCanvas.width = 256
+            if (bottomCanvas.height !== 192) bottomCanvas.height = 192
 
-            const topContext = topCanvas.getContext('2d')
-            const bottomContext = bottomCanvas.getContext('2d')
+            const topContext = topCanvas.getContext('2d', { willReadFrequently: true })
+            const bottomContext = bottomCanvas.getContext('2d', { willReadFrequently: true })
 
             if (topContext && bottomContext) {
               topContext.imageSmoothingEnabled = false
               bottomContext.imageSmoothingEnabled = false
+
               topContext.drawImage(
                 currentSource,
                 0,
@@ -175,57 +293,71 @@ export function useNdsRomEmulator(file: File | null) {
                 256,
                 192,
               )
-              setStatus((current) => (current === 'running' ? current : 'running'))
+
+              const age = performance.now() - firstCanvasAt
+              if (status !== 'running' && (hasMeaningfulFrame(topCanvas) || hasMeaningfulFrame(bottomCanvas) || age > 8000)) {
+                setStatus('running')
+                setStage('Ejecutando')
+              }
             }
           }
 
           animationFrameRef.current = window.requestAnimationFrame(draw)
         }
 
+        window.clearInterval(canvasInterval)
         draw()
       } catch (reason) {
-        window.clearInterval(locateCanvas)
+        window.clearInterval(canvasInterval)
         setStatus('error')
         setError(reason instanceof Error ? reason.message : 'No se pudo acceder al framebuffer del emulador.')
+        setStage('Error leyendo el framebuffer')
       }
     }, 100)
 
     return () => {
       disposed = true
-      window.clearInterval(locateCanvas)
+      window.clearInterval(bootInterval)
+      window.clearInterval(canvasInterval)
+
+      const frameWindow = iframeRef.current?.contentWindow
+      if (frameWindow && childErrorHandler) frameWindow.removeEventListener('error', childErrorHandler)
+      if (frameWindow && rejectionHandler) frameWindow.removeEventListener('unhandledrejection', rejectionHandler)
+
       if (animationFrameRef.current !== null) {
         window.cancelAnimationFrame(animationFrameRef.current)
         animationFrameRef.current = null
       }
+
       sourceCanvasRef.current = null
     }
-  }, [romUrl])
+  }, [file, romToken])
 
   const sendKey = useCallback((key: string, pressed: boolean) => {
     const frameWindow = iframeRef.current?.contentWindow
     if (!frameWindow) return
 
-    const init: KeyboardEventInit = {
+    const event = new KeyboardEvent(pressed ? 'keydown' : 'keyup', {
       key,
       code: key.length === 1 ? `Key${key.toUpperCase()}` : key,
       bubbles: true,
       cancelable: true,
-    }
+    })
 
-    frameWindow.dispatchEvent(new KeyboardEvent(pressed ? 'keydown' : 'keyup', init))
-    frameWindow.document.dispatchEvent(new KeyboardEvent(pressed ? 'keydown' : 'keyup', init))
+    frameWindow.dispatchEvent(event)
+    frameWindow.document.dispatchEvent(event)
   }, [])
 
   const sendTouch = useCallback((phase: TouchPhase, x: number, y: number) => {
     const source = sourceCanvasRef.current
-    const frameWindow = iframeRef.current?.contentWindow
-    if (!source || !frameWindow) return
+    if (!source) return
 
     const rect = source.getBoundingClientRect()
-    const clientX = rect.left + Math.max(0, Math.min(1, x)) * rect.width
-    const clientY = rect.top + (0.5 + Math.max(0, Math.min(1, y)) * 0.5) * rect.height
+    const normalizedX = Math.max(0, Math.min(1, x))
+    const normalizedY = Math.max(0, Math.min(1, y))
+    const clientX = rect.left + normalizedX * rect.width
+    const clientY = rect.top + (0.5 + normalizedY * 0.5) * rect.height
     const eventType = phase === 'down' ? 'mousedown' : phase === 'up' ? 'mouseup' : 'mousemove'
-    const buttons = phase === 'up' ? 0 : 1
 
     source.dispatchEvent(
       new MouseEvent(eventType, {
@@ -234,7 +366,7 @@ export function useNdsRomEmulator(file: File | null) {
         clientX,
         clientY,
         button: 0,
-        buttons,
+        buttons: phase === 'up' ? 0 : 1,
       }),
     )
   }, [])
@@ -245,6 +377,7 @@ export function useNdsRomEmulator(file: File | null) {
     bottomCanvasRef,
     srcDoc,
     status,
+    stage,
     error,
     metadata,
     sendKey,
