@@ -163,7 +163,7 @@ export function useNdsRomEmulator(file: File | null) {
 
       loaderInjected = true
       window.clearInterval(bootInterval)
-      setStage('Cargando EmulatorJS y el core Nintendo DS…')
+      setStage('Cargando EmulatorJS y DeSmuME…')
 
       childErrorHandler = (event: ErrorEvent) => {
         if (disposed) return
@@ -203,14 +203,14 @@ export function useNdsRomEmulator(file: File | null) {
       ejsWindow.EJS_gameName = file.name.replace(/\.nds$/i, '')
       ejsWindow.EJS_biosUrl = ''
       ejsWindow.EJS_gameUrl = gameUrl
-      ejsWindow.EJS_core = 'nds'
+      ejsWindow.EJS_core = 'desmume'
       ejsWindow.EJS_pathtodata = EJS_DATA_PATH
       ejsWindow.EJS_startOnLoaded = true
       ejsWindow.EJS_threads = false
       ejsWindow.EJS_volume = 0.75
       ejsWindow.EJS_language = 'es-ES'
       ejsWindow.EJS_ready = () => {
-        if (!disposed) setStage('Core listo. Iniciando la Game Card…')
+        if (!disposed) setStage('DeSmuME listo. Iniciando la Game Card…')
       }
 
       const loader = frameDocument.createElement('script')
@@ -237,7 +237,7 @@ export function useNdsRomEmulator(file: File | null) {
         if (!source) {
           if (canvasAttempts > 400) {
             setStatus('error')
-            setError('El core Nintendo DS no llegó a crear su framebuffer.')
+            setError('DeSmuME no llegó a crear su framebuffer.')
             setStage('No se ha recibido imagen del emulador')
             window.clearInterval(canvasInterval)
           }
