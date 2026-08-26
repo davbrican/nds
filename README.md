@@ -52,7 +52,7 @@ docker compose up -d --build
 Por defecto la aplicación queda disponible en:
 
 ```text
-http://localhost:8092
+http://localhost:8093
 ```
 
 Ver logs:
@@ -73,7 +73,7 @@ El puerto puede cambiarse sin editar el compose:
 NDS_PORT=8080 docker compose up -d --build
 ```
 
-El contenedor escucha internamente en el puerto `80`. Esto permite poner un Nginx del host, Caddy, Traefik u otro reverse proxy por delante apuntando a `127.0.0.1:8092`.
+El contenedor escucha internamente en el puerto `80`. Esto permite poner un Nginx del host, Caddy, Traefik u otro reverse proxy por delante apuntando a `127.0.0.1:8093`.
 
 ## Arquitectura prevista
 
