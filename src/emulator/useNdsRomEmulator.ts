@@ -139,6 +139,7 @@ export function useNdsRomEmulator(file: File | null) {
     let loaderInjected = false
     let childErrorHandler: ((event: ErrorEvent) => void) | null = null
     let rejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null
+    let gameUrl: string | null = null
 
     const bootInterval = window.setInterval(() => {
       if (disposed || loaderInjected) return
@@ -187,7 +188,7 @@ export function useNdsRomEmulator(file: File | null) {
         EJS_player?: string
         EJS_gameName?: string
         EJS_biosUrl?: string
-        EJS_gameUrl?: File | string
+        EJS_gameUrl?: string
         EJS_core?: string
         EJS_pathtodata?: string
         EJS_startOnLoaded?: boolean
@@ -197,10 +198,11 @@ export function useNdsRomEmulator(file: File | null) {
         EJS_ready?: () => void
       }
 
+      gameUrl = URL.createObjectURL(file)
       ejsWindow.EJS_player = '#game'
       ejsWindow.EJS_gameName = file.name.replace(/\.nds$/i, '')
       ejsWindow.EJS_biosUrl = ''
-      ejsWindow.EJS_gameUrl = file
+      ejsWindow.EJS_gameUrl = gameUrl
       ejsWindow.EJS_core = 'nds'
       ejsWindow.EJS_pathtodata = EJS_DATA_PATH
       ejsWindow.EJS_startOnLoaded = true
@@ -330,6 +332,7 @@ export function useNdsRomEmulator(file: File | null) {
       }
 
       sourceCanvasRef.current = null
+      if (gameUrl) URL.revokeObjectURL(gameUrl)
     }
   }, [file, romToken])
 
