@@ -25,7 +25,7 @@ Prototipo web responsive inspirado en una consola Nintendo DS: dos pantallas, pa
 
 En móvil se pueden usar directamente la cruceta y los botones de la consola. La pantalla inferior responde a gestos táctiles.
 
-## Desarrollo
+## Desarrollo local
 
 ```bash
 npm install
@@ -38,6 +38,42 @@ Build de producción:
 npm run build
 npm run preview
 ```
+
+## Docker
+
+La imagen usa un build multi-stage: Node compila la aplicación con Vite y Nginx sirve únicamente el contenido generado de `dist`.
+
+Construir y arrancar:
+
+```bash
+docker compose up -d --build
+```
+
+Por defecto la aplicación queda disponible en:
+
+```text
+http://localhost:8092
+```
+
+Ver logs:
+
+```bash
+docker compose logs -f nds
+```
+
+Parar:
+
+```bash
+docker compose down
+```
+
+El puerto puede cambiarse sin editar el compose:
+
+```bash
+NDS_PORT=8080 docker compose up -d --build
+```
+
+El contenedor escucha internamente en el puerto `80`. Esto permite poner un Nginx del host, Caddy, Traefik u otro reverse proxy por delante apuntando a `127.0.0.1:8092`.
 
 ## Arquitectura prevista
 
