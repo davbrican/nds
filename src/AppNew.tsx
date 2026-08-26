@@ -5,7 +5,11 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
-import { useNdsRomEmulator } from './emulator/useNdsRomEmulator'
+import {
+  readNdsMetadata,
+  useNdsRomEmulator,
+  type NdsRomMetadata,
+} from './emulator/useNdsRomEmulator'
 import './emulator.css'
 
 type Control =
@@ -22,18 +26,20 @@ type Control =
   | 'start'
   | 'select'
 
-type AppId = 'emulator' | 'touch' | 'playground' | 'system'
+type AppId = 'emulator' | 'pictochat' | 'download' | 'settings'
 
 type Point = {
   x: number
   y: number
 }
 
-const apps: Array<{ id: AppId; title: string; subtitle: string; icon: string }> = [
-  { id: 'emulator', title: 'NDS Player', subtitle: 'Carga una ROM .nds local', icon: '▣' },
-  { id: 'touch', title: 'Touch Lab', subtitle: 'Prueba la pantalla táctil', icon: '✦' },
-  { id: 'playground', title: 'Mini Game', subtitle: 'D-pad + botones', icon: '◆' },
-  { id: 'system', title: 'System', subtitle: 'Estado de controles', icon: '⚙' },
+type UserColor = 'blue' | 'green' | 'pink' | 'orange'
+
+const menuItems: Array<{ id: AppId; title: string }> = [
+  { id: 'emulator', title: 'Nintendo DS Game' },
+  { id: 'pictochat', title: 'PictoChat' },
+  { id: 'download', title: 'DS Download Play' },
+  { id: 'settings', title: 'Settings' },
 ]
 
 const menuKeyboardMap: Record<string, Control | undefined> = {
@@ -93,78 +99,55 @@ const emulatorControlKeys: Record<Control, string> = {
   select: 'Shift',
 }
 
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value))
 
 function AppNew() {
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [activeApp, setActiveApp] = useState<AppId | null>(null)
   const [pressed, setPressed] = useState<Set<Control>>(new Set())
-  const [touchPoint, setTouchPoint] = useState<Point>({ x: 50, y: 50 })
-  const [player, setPlayer] = useState<Point>({ x: 50, y: 62 })
-  const [score, setScore] = useState(0)
-  const [pulse, setPulse] = useState(false)
   const [romFile, setRomFile] = useState<File | null>(null)
+  const [romMetadata, setRomMetadata] = useState<NdsRomMetadata | null>(null)
   const [romValidationError, setRomValidationError] = useState<string | null>(null)
+  const [now, setNow] = useState(() => new Date())
+  const [brightness, setBrightness] = useState(3)
+  const [alarmOn, setAlarmOn] = useState(false)
+  const [userColor, setUserColor] = useState<UserColor>('blue')
+  const [chatPoints, setChatPoints] = useState<Point[]>([])
 
   const emulator = useNdsRomEmulator(activeApp === 'emulator' ? romFile : null)
-  const selectedApp = apps[selectedIndex]
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   const goHome = useCallback(() => {
     setActiveApp(null)
-    setRomFile(null)
     setRomValidationError(null)
     setPressed(new Set())
   }, [])
 
-  const movePlayer = useCallback((control: Control) => {
-    if (!['up', 'down', 'left', 'right'].includes(control)) return
+  const openSelected = useCallback(() => {
+    setActiveApp(menuItems[selectedIndex].id)
+  }, [selectedIndex])
 
-    setPlayer((current) => {
-      const step = 5
-      const next = { ...current }
-      if (control === 'up') next.y -= step
-      if (control === 'down') next.y += step
-      if (control === 'left') next.x -= step
-      if (control === 'right') next.x += step
-      return {
-        x: clamp(next.x, 8, 92),
-        y: clamp(next.y, 18, 86),
-      }
-    })
-  }, [])
-
-  const handleAction = useCallback(
+  const handleMenuAction = useCallback(
     (control: Control) => {
       if (activeApp === null) {
         if (control === 'left' || control === 'up') {
-          setSelectedIndex((index) => (index - 1 + apps.length) % apps.length)
+          setSelectedIndex((index) => (index - 1 + menuItems.length) % menuItems.length)
         }
         if (control === 'right' || control === 'down') {
-          setSelectedIndex((index) => (index + 1) % apps.length)
+          setSelectedIndex((index) => (index + 1) % menuItems.length)
         }
-        if (control === 'a' || control === 'start') {
-          setActiveApp(apps[selectedIndex].id)
-        }
+        if (control === 'a' || control === 'start') openSelected()
         return
       }
 
-      if (activeApp === 'emulator') return
-
-      if (control === 'b') {
-        goHome()
-        return
-      }
-
-      if (activeApp === 'playground') {
-        movePlayer(control)
-        if (control === 'a') {
-          setScore((value) => value + 1)
-          setPulse(true)
-          window.setTimeout(() => setPulse(false), 180)
-        }
-      }
+      if (activeApp !== 'emulator' && control === 'b') goHome()
     },
-    [activeApp, goHome, movePlayer, selectedIndex],
+    [activeApp, goHome, openSelected],
   )
 
   const setControlPressed = useCallback(
@@ -180,9 +163,9 @@ function AppNew() {
         emulator.sendKey(emulatorControlKeys[control], isPressed)
       }
 
-      if (isPressed) handleAction(control)
+      if (isPressed) handleMenuAction(control)
     },
-    [activeApp, emulator.sendKey, handleAction, romFile],
+    [activeApp, emulator.sendKey, handleMenuAction, romFile],
   )
 
   useEffect(() => {
@@ -193,39 +176,31 @@ function AppNew() {
         return
       }
 
-      const control = (activeApp === 'emulator' ? emulatorKeyboardMap : menuKeyboardMap)[event.key]
+      const map = activeApp === 'emulator' ? emulatorKeyboardMap : menuKeyboardMap
+      const control = map[event.key]
       if (!control) return
-      event.preventDefault()
 
-      if (!event.repeat) {
-        setControlPressed(control, true)
-      } else if (activeApp === 'playground') {
-        movePlayer(control)
-      }
+      event.preventDefault()
+      if (!event.repeat) setControlPressed(control, true)
     }
 
     const onKeyUp = (event: KeyboardEvent) => {
-      const control = (activeApp === 'emulator' ? emulatorKeyboardMap : menuKeyboardMap)[event.key]
+      const map = activeApp === 'emulator' ? emulatorKeyboardMap : menuKeyboardMap
+      const control = map[event.key]
       if (!control) return
+
       event.preventDefault()
       setControlPressed(control, false)
     }
 
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
+
     return () => {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
     }
-  }, [activeApp, goHome, movePlayer, setControlPressed])
-
-  const updateTouchPoint = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect()
-    setTouchPoint({
-      x: clamp(((event.clientX - rect.left) / rect.width) * 100, 0, 100),
-      y: clamp(((event.clientY - rect.top) / rect.height) * 100, 0, 100),
-    })
-  }
+  }, [activeApp, goHome, setControlPressed])
 
   const sendEmulatorTouch = (
     event: ReactPointerEvent<HTMLDivElement>,
@@ -237,136 +212,154 @@ function AppNew() {
     emulator.sendTouch(phase, x, y)
   }
 
+  const addPictoPoint = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    setChatPoints((points) => [
+      ...points.slice(-650),
+      {
+        x: clamp(((event.clientX - rect.left) / rect.width) * 100, 0, 100),
+        y: clamp(((event.clientY - rect.top) / rect.height) * 100, 0, 100),
+      },
+    ])
+  }
+
   const onTouchSurfacePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    event.currentTarget.setPointerCapture(event.pointerId)
     if (activeApp === 'emulator' && romFile) {
+      event.currentTarget.setPointerCapture(event.pointerId)
       sendEmulatorTouch(event, 'down')
       return
     }
-    updateTouchPoint(event)
+
+    if (activeApp === 'pictochat') {
+      event.currentTarget.setPointerCapture(event.pointerId)
+      addPictoPoint(event)
+    }
   }
 
   const onTouchSurfacePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+
     if (activeApp === 'emulator' && romFile) {
       sendEmulatorTouch(event, 'move')
       return
     }
-    updateTouchPoint(event)
+
+    if (activeApp === 'pictochat') addPictoPoint(event)
   }
 
   const onTouchSurfacePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (activeApp === 'emulator' && romFile) sendEmulatorTouch(event, 'up')
+
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
   }
 
-  const controlSummary = useMemo(
-    () => (pressed.size ? [...pressed].join(' + ').toUpperCase() : 'NINGUNO'),
-    [pressed],
-  )
-
-  const chooseRom = (file: File | undefined) => {
+  const chooseRom = async (file: File | undefined) => {
     if (!file) return
+
     if (!file.name.toLowerCase().endsWith('.nds')) {
-      setRomFile(null)
       setRomValidationError('Selecciona un archivo con extensión .nds.')
       return
     }
+
     if (file.size < 512) {
-      setRomFile(null)
       setRomValidationError('El archivo es demasiado pequeño para ser una ROM NDS válida.')
       return
     }
 
     setRomValidationError(null)
     setRomFile(file)
+
+    try {
+      setRomMetadata(await readNdsMetadata(file))
+    } catch {
+      setRomMetadata({
+        title: file.name.replace(/\.nds$/i, ''),
+        gameCode: '',
+        makerCode: '',
+        version: 0,
+        size: file.size,
+      })
+    }
   }
 
+  const ejectRom = () => {
+    setRomFile(null)
+    setRomMetadata(null)
+    setRomValidationError(null)
+    goHome()
+  }
+
+  const cycleBrightness = () => setBrightness((value) => (value + 1) % 4)
+
+  const themeClass = `theme-${userColor}`
+
   return (
-    <main className="page-shell">
-      <section className="console" aria-label="Consola de doble pantalla">
+    <main className={`page-shell ${themeClass}`}>
+      <section className="console ds-lite" aria-label="Nintendo DS web console">
         <div className="lid lid-top">
           <div className="speaker speaker-left" aria-hidden="true" />
-          <ScreenFrame label="TOP">
-            {activeApp === null && (
-              <div className="home-top-screen">
-                <div className="brand-mark">NDS</div>
-                <p>WEB CONSOLE</p>
-                <div className="status-row">
-                  <span>READY</span>
-                  <span>Wi-Fi ◉</span>
-                  <span>WEB</span>
-                </div>
-                <div className="selected-preview">
-                  <span className="preview-icon">{selectedApp.icon}</span>
-                  <div>
-                    <strong>{selectedApp.title}</strong>
-                    <small>{selectedApp.subtitle}</small>
-                  </div>
-                </div>
-              </div>
-            )}
+          <ScreenFrame brightness={brightness}>
+            {activeApp === null && <DsHomeTop now={now} alarmOn={alarmOn} />}
 
             {activeApp === 'emulator' && !romFile && (
-              <div className="rom-intro-screen">
-                <span className="eyebrow">NINTENDO DS ROM PLAYER</span>
-                <strong>Carga un archivo .nds</strong>
-                <p>La ROM se procesa localmente en tu navegador y no se sube al servidor.</p>
-                <small>Core inicial: DeSmuME / WebAssembly</small>
+              <div className="ds-system-page game-card-info">
+                <div className="system-page-title">Nintendo DS Game Card</div>
+                <div className="game-card-illustration">
+                  <span>NINTENDO</span>
+                  <strong>DS</strong>
+                </div>
+                <p>Insert a Game Card to begin.</p>
               </div>
             )}
 
             {activeApp === 'emulator' && romFile && (
               <div className="rom-screen">
-                <canvas ref={emulator.topCanvasRef} className="rom-canvas" aria-label="Pantalla superior NDS" />
+                <canvas
+                  ref={emulator.topCanvasRef}
+                  className="rom-canvas"
+                  aria-label="Pantalla superior Nintendo DS"
+                />
                 {emulator.status !== 'running' && (
-                  <div className="rom-loading-overlay">
-                    <strong>{emulator.status === 'error' ? 'ERROR' : 'CARGANDO ROM…'}</strong>
-                    <small>{emulator.error ?? 'Descargando el core y preparando WebAssembly'}</small>
+                  <div className={`rom-loading-overlay ${emulator.status === 'error' ? 'is-error' : ''}`}>
+                    <div className="ds-loading-dots" aria-hidden="true">
+                      <i />
+                      <i />
+                      <i />
+                    </div>
+                    <strong>{emulator.status === 'error' ? 'Unable to start Game Card' : 'Loading Game Card…'}</strong>
+                    <small>{emulator.error ?? emulator.stage}</small>
                   </div>
                 )}
               </div>
             )}
 
-            {activeApp === 'touch' && (
-              <div className="touch-top-screen">
-                <span className="eyebrow">TOUCH POSITION</span>
-                <div className="floating-orb" style={{ left: `${touchPoint.x}%`, top: `${touchPoint.y}%` }} />
-                <strong>X {touchPoint.x.toFixed(0)} · Y {touchPoint.y.toFixed(0)}</strong>
-                <small>Mueve el dedo o el ratón por la pantalla inferior.</small>
+            {activeApp === 'pictochat' && (
+              <div className="ds-system-page picto-top">
+                <div className="system-page-title">PictoChat</div>
+                <div className="picto-logo">P</div>
+                <strong>Room A</strong>
+                <p>0 participants nearby</p>
+                <small>Messages are not sent over the internet.</small>
               </div>
             )}
 
-            {activeApp === 'playground' && (
-              <div className="game-screen">
-                <div className="game-hud">
-                  <span>MINI GAME</span>
-                  <span>A × {score}</span>
-                </div>
-                <div className="game-grid" />
-                <div
-                  className={`player ${pulse ? 'player-pulse' : ''}`}
-                  style={{ left: `${player.x}%`, top: `${player.y}%` }}
-                >
-                  ▲
-                </div>
-                <div className="game-target" style={{ left: `${touchPoint.x}%`, top: `${touchPoint.y}%` }}>
-                  ×
-                </div>
+            {activeApp === 'download' && (
+              <div className="ds-system-page download-top">
+                <div className="system-page-title">DS Download Play</div>
+                <div className="wireless-rings" aria-hidden="true"><i /><i /><i /></div>
+                <strong>Searching for software…</strong>
+                <p>Keep this system within range of the host Nintendo DS.</p>
               </div>
             )}
 
-            {activeApp === 'system' && (
-              <div className="system-screen">
-                <span className="eyebrow">INPUT MONITOR</span>
-                <strong>{controlSummary}</strong>
-                <div className="system-grid">
-                  <span>Touch X</span><b>{touchPoint.x.toFixed(1)}</b>
-                  <span>Touch Y</span><b>{touchPoint.y.toFixed(1)}</b>
-                  <span>Mode</span><b>{matchMedia('(pointer: coarse)').matches ? 'TOUCH' : 'POINTER'}</b>
-                </div>
+            {activeApp === 'settings' && (
+              <div className="ds-system-page settings-top">
+                <div className="system-page-title">System Settings</div>
+                <div className="settings-symbol">◆</div>
+                <p>Choose a panel on the Touch Screen.</p>
+                <small>Web console settings</small>
               </div>
             )}
           </ScreenFrame>
@@ -374,89 +367,141 @@ function AppNew() {
         </div>
 
         <div className="hinge" aria-hidden="true">
-          <span />
+          <span className="hinge-left" />
+          <span className="hinge-logo">NDS</span>
           <span className="power-led" />
-          <span />
+          <span className="hinge-right" />
         </div>
 
         <div className="lid lid-bottom">
-          <ScreenFrame label="TOUCH" touch>
+          <ScreenFrame brightness={brightness} touch>
             <div
-              className={`touch-surface ${activeApp === 'emulator' ? 'touch-surface-emulator' : ''}`}
+              className={`touch-surface ${
+                activeApp === 'emulator' && romFile ? 'touch-surface-emulator' : ''
+              }`}
               onPointerDown={onTouchSurfacePointerDown}
               onPointerMove={onTouchSurfacePointerMove}
               onPointerUp={onTouchSurfacePointerUp}
               onPointerCancel={onTouchSurfacePointerUp}
             >
               {activeApp === null && (
-                <div className="launcher-grid launcher-grid-four">
-                  {apps.map((app, index) => (
-                    <button
-                      className={`launcher-card ${selectedIndex === index ? 'launcher-card-selected' : ''}`}
-                      key={app.id}
-                      onPointerDown={(event) => event.stopPropagation()}
-                      onClick={() => {
-                        setSelectedIndex(index)
-                        setActiveApp(app.id)
-                      }}
-                    >
-                      <span>{app.icon}</span>
-                      <strong>{app.title}</strong>
-                    </button>
-                  ))}
-                </div>
+                <DsHomeBottom
+                  selectedIndex={selectedIndex}
+                  romMetadata={romMetadata}
+                  hasRom={Boolean(romFile)}
+                  brightness={brightness}
+                  alarmOn={alarmOn}
+                  onSelect={(index, app) => {
+                    setSelectedIndex(index)
+                    setActiveApp(app)
+                  }}
+                  onBrightness={cycleBrightness}
+                  onAlarm={() => setAlarmOn((value) => !value)}
+                />
               )}
 
               {activeApp === 'emulator' && !romFile && (
-                <div className="rom-loader-panel">
-                  <div className="rom-chip">NDS</div>
-                  <strong>INSERT GAME CARD</strong>
-                  <p>Selecciona una copia .nds que tengas derecho a utilizar.</p>
-                  <label className="rom-file-button" onPointerDown={(event) => event.stopPropagation()}>
-                    CARGAR .NDS
+                <div className="ds-rom-loader">
+                  <div className="insert-card-row">
+                    <span className="mini-card-icon">DS</span>
+                    <div>
+                      <strong>No Game Card inserted</strong>
+                      <small>Choose a local .nds file</small>
+                    </div>
+                  </div>
+
+                  <label
+                    className="ds-action-button"
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    Load Game Card
                     <input
                       type="file"
                       accept=".nds,application/octet-stream"
                       onChange={(event) => chooseRom(event.target.files?.[0])}
                     />
                   </label>
-                  {romValidationError && <small className="rom-error">{romValidationError}</small>}
+
+                  {romValidationError && <p className="rom-error">{romValidationError}</p>}
+                  <button type="button" className="ds-text-button" onClick={goHome}>Back</button>
                 </div>
               )}
 
               {activeApp === 'emulator' && romFile && (
                 <div className="rom-screen rom-touch-screen">
-                  <canvas ref={emulator.bottomCanvasRef} className="rom-canvas" aria-label="Pantalla táctil NDS" />
-                  <div className="rom-meta-badge">
-                    <strong>{emulator.metadata?.title || romFile.name}</strong>
-                    {emulator.metadata?.gameCode && <small>{emulator.metadata.gameCode}</small>}
+                  <canvas
+                    ref={emulator.bottomCanvasRef}
+                    className="rom-canvas"
+                    aria-label="Pantalla táctil Nintendo DS"
+                  />
+                  {emulator.status === 'error' && (
+                    <button type="button" className="rom-eject-float" onClick={ejectRom}>
+                      Eject
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {activeApp === 'pictochat' && (
+                <div className="picto-touch">
+                  <div className="picto-toolbar">
+                    <strong>PictoChat</strong>
+                    <button type="button" onClick={() => setChatPoints([])}>Clear</button>
                   </div>
+                  <div className="picto-paper">
+                    {chatPoints.map((point, index) => (
+                      <i key={`${index}-${point.x}-${point.y}`} style={{ left: `${point.x}%`, top: `${point.y}%` }} />
+                    ))}
+                    {!chatPoints.length && <span>Write or draw with the stylus</span>}
+                  </div>
+                  <button type="button" className="picto-send" disabled>Send</button>
                 </div>
               )}
 
-              {activeApp === 'touch' && (
-                <div className="touch-pad-demo">
-                  <div className="touch-crosshair" style={{ left: `${touchPoint.x}%`, top: `${touchPoint.y}%` }}><i /></div>
-                  <strong>TOCA Y ARRASTRA</strong>
-                  <small>B para volver</small>
+              {activeApp === 'download' && (
+                <div className="download-touch">
+                  <div className="download-header">Game Selection</div>
+                  <div className="download-empty">
+                    <span className="wireless-small">)))</span>
+                    <strong>No software titles found.</strong>
+                    <small>Search is simulated in this web version.</small>
+                  </div>
+                  <button type="button" className="ds-text-button" onClick={goHome}>Back</button>
                 </div>
               )}
 
-              {activeApp === 'playground' && (
-                <div className="game-touch-panel">
-                  <strong>OBJETIVO</strong>
-                  <p>Toca para mover la mira. Usa la cruceta para mover el jugador y A para sumar puntos.</p>
-                  <div className="mini-radar"><i style={{ left: `${touchPoint.x}%`, top: `${touchPoint.y}%` }} /></div>
-                  <small>B · HOME</small>
-                </div>
-              )}
-
-              {activeApp === 'system' && (
-                <div className="system-touch-panel">
-                  <strong>CONTROLES</strong>
-                  <p>Menú: flechas/WASD · Z = A · X = B.</p>
-                  <p>ROM: flechas · Z/A · X/B · S/X · A/Y · Q/L · W/R.</p>
-                  <small>B · HOME</small>
+              {activeApp === 'settings' && (
+                <div className="settings-touch">
+                  <button type="button" className="settings-tile" onClick={cycleBrightness}>
+                    <span>☀</span>
+                    <strong>Brightness</strong>
+                    <small>{brightness + 1} / 4</small>
+                  </button>
+                  <button type="button" className="settings-tile" onClick={() => setAlarmOn((value) => !value)}>
+                    <span>◷</span>
+                    <strong>Alarm</strong>
+                    <small>{alarmOn ? 'On' : 'Off'}</small>
+                  </button>
+                  <div className="settings-tile settings-colors">
+                    <span>●</span>
+                    <strong>User Color</strong>
+                    <div className="color-dots">
+                      {(['blue', 'green', 'pink', 'orange'] as UserColor[]).map((color) => (
+                        <button
+                          key={color}
+                          type="button"
+                          className={`color-dot color-${color} ${userColor === color ? 'selected' : ''}`}
+                          aria-label={`Color ${color}`}
+                          onClick={() => setUserColor(color)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  <button type="button" className="settings-tile" onClick={goHome}>
+                    <span>↩</span>
+                    <strong>Back</strong>
+                    <small>DS Menu</small>
+                  </button>
                 </div>
               )}
             </div>
@@ -486,7 +531,9 @@ function AppNew() {
                 onChange={(value) => setControlPressed('select', value)}
               />
               {activeApp === 'emulator' && (
-                <button type="button" className="pill-button home-pill" onClick={goHome}>HOME</button>
+                <button type="button" className="pill-button menu-pill" onClick={goHome}>
+                  MENU
+                </button>
               )}
               <ControlButton
                 label="START"
@@ -522,19 +569,22 @@ function AppNew() {
                 onChange={(value) => setControlPressed('b', value)}
               />
             </div>
+
+            <span className="mic-label">MIC.</span>
           </div>
         </div>
       </section>
 
       <p className="desktop-hint">
         {activeApp === 'emulator'
-          ? 'ROM · Flechas · Z=A · X=B · S=X · A=Y · Q=L · W=R · Enter=Start · Shift=Select · Esc=Home'
-          : 'PC · Flechas/WASD · Z=A · X=B · Enter=Start · Shift=Select'}
+          ? 'ROM · Flechas · Z=A · X=B · S=X · A=Y · Q=L · W=R · Enter=Start · Shift=Select · Esc=Menu'
+          : 'Menú · Flechas/WASD · Z=A · X=B · Enter=Start'}
       </p>
 
       {activeApp === 'emulator' && romFile && (
         <iframe
           ref={emulator.iframeRef}
+          key={`${romFile.name}-${romFile.size}-${romFile.lastModified}`}
           className="emulator-engine-frame"
           srcDoc={emulator.srcDoc}
           title="Motor interno del emulador Nintendo DS"
@@ -545,16 +595,211 @@ function AppNew() {
   )
 }
 
-function ScreenFrame({ children, label, touch = false }: { children: React.ReactNode; label: string; touch?: boolean }) {
+function DsHomeTop({ now, alarmOn }: { now: Date; alarmOn: boolean }) {
   return (
-    <div className={`screen-bezel ${touch ? 'screen-bezel-touch' : ''}`}>
-      <div className="screen-label">{label}</div>
-      <div className="screen">{children}</div>
+    <div className="ds-home-top">
+      <div className="ds-top-status">
+        <span className="user-name">Player</span>
+        <span className="top-icons">
+          <i className="startup-mode">M</i>
+          <i className="battery-icon"><b /></i>
+        </span>
+      </div>
+
+      <div className="ds-home-main">
+        <AnalogClock now={now} alarmOn={alarmOn} />
+        <Calendar now={now} />
+      </div>
+
+      <div className="ds-home-footer">
+        <span>{formatDate(now)}</span>
+        <strong>{formatTime(now)}</strong>
+      </div>
     </div>
   )
 }
 
-function DPad({ pressed, setPressed }: { pressed: Set<Control>; setPressed: (control: Control, value: boolean) => void }) {
+function AnalogClock({ now, alarmOn }: { now: Date; alarmOn: boolean }) {
+  const seconds = now.getSeconds()
+  const minutes = now.getMinutes() + seconds / 60
+  const hours = (now.getHours() % 12) + minutes / 60
+
+  return (
+    <div className="clock-block">
+      <div className="analog-clock" aria-label={formatTime(now)}>
+        {Array.from({ length: 12 }, (_, index) => (
+          <i
+            key={index}
+            className="clock-tick"
+            style={{ transform: `translateX(-50%) rotate(${index * 30}deg)` }}
+          />
+        ))}
+        <span className="clock-hand hour-hand" style={{ transform: `rotate(${hours * 30}deg)` }} />
+        <span className="clock-hand minute-hand" style={{ transform: `rotate(${minutes * 6}deg)` }} />
+        <span className="clock-hand second-hand" style={{ transform: `rotate(${seconds * 6}deg)` }} />
+        <b className="clock-pin" />
+      </div>
+      {alarmOn && <span className="alarm-indicator">● ALARM</span>}
+    </div>
+  )
+}
+
+function Calendar({ now }: { now: Date }) {
+  const year = now.getFullYear()
+  const month = now.getMonth()
+  const firstDay = new Date(year, month, 1)
+  const startOffset = (firstDay.getDay() + 6) % 7
+  const daysInMonth = new Date(year, month + 1, 0).getDate()
+  const days = Array.from({ length: 42 }, (_, index) => {
+    const day = index - startOffset + 1
+    return day >= 1 && day <= daysInMonth ? day : null
+  })
+
+  const monthName = new Intl.DateTimeFormat('es-ES', { month: 'long' }).format(now)
+
+  return (
+    <div className="calendar-block">
+      <div className="calendar-heading">
+        <strong>{monthName}</strong>
+        <span>{year}</span>
+      </div>
+      <div className="calendar-grid weekdays">
+        {['L', 'M', 'X', 'J', 'V', 'S', 'D'].map((day) => <span key={day}>{day}</span>)}
+      </div>
+      <div className="calendar-grid calendar-days">
+        {days.map((day, index) => (
+          <span
+            key={`${day ?? 'empty'}-${index}`}
+            className={day === now.getDate() ? 'today' : ''}
+          >
+            {day ?? ''}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function DsHomeBottom({
+  selectedIndex,
+  romMetadata,
+  hasRom,
+  brightness,
+  alarmOn,
+  onSelect,
+  onBrightness,
+  onAlarm,
+}: {
+  selectedIndex: number
+  romMetadata: NdsRomMetadata | null
+  hasRom: boolean
+  brightness: number
+  alarmOn: boolean
+  onSelect: (index: number, app: AppId) => void
+  onBrightness: () => void
+  onAlarm: () => void
+}) {
+  return (
+    <div className="ds-menu-home">
+      <div className="utility-strip">
+        <button type="button" className="utility-button" onClick={onBrightness}>
+          <span className="sun-icon">☀</span>
+          <small>{brightness + 1}</small>
+        </button>
+        <div className="utility-center">
+          <span className="wireless-icon">)))</span>
+          <small>DS Menu</small>
+        </div>
+        <button type="button" className={`utility-button ${alarmOn ? 'active' : ''}`} onClick={onAlarm}>
+          <span>◷</span>
+          <small>{alarmOn ? 'ON' : 'OFF'}</small>
+        </button>
+      </div>
+
+      <button
+        type="button"
+        className={`ds-menu-panel game-panel ${selectedIndex === 0 ? 'selected' : ''}`}
+        onClick={() => onSelect(0, 'emulator')}
+      >
+        <span className="panel-icon game-card-icon">DS</span>
+        <span className="panel-copy">
+          <strong>{hasRom ? (romMetadata?.title || 'Nintendo DS Game') : 'Nintendo DS Game'}</strong>
+          <small>{hasRom ? 'Game Card inserted' : 'There is no DS Game Card inserted.'}</small>
+        </span>
+        <span className="panel-arrow">›</span>
+      </button>
+
+      <div className="menu-pair">
+        <button
+          type="button"
+          className={`ds-menu-panel small-panel ${selectedIndex === 1 ? 'selected' : ''}`}
+          onClick={() => onSelect(1, 'pictochat')}
+        >
+          <span className="panel-icon picto-icon">P</span>
+          <span className="panel-copy">
+            <strong>PictoChat</strong>
+            <small>Chat locally</small>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          className={`ds-menu-panel small-panel ${selectedIndex === 2 ? 'selected' : ''}`}
+          onClick={() => onSelect(2, 'download')}
+        >
+          <span className="panel-icon download-icon">)))</span>
+          <span className="panel-copy">
+            <strong>DS Download Play</strong>
+            <small>Receive software</small>
+          </span>
+        </button>
+      </div>
+
+      <div className="menu-bottom-row">
+        <div className="gba-panel" aria-disabled="true">
+          <span className="gba-mark">GBA</span>
+          <span>
+            <strong>Game Boy Advance</strong>
+            <small>There is no Game Pak inserted.</small>
+          </span>
+        </div>
+        <button
+          type="button"
+          className={`settings-panel ${selectedIndex === 3 ? 'selected' : ''}`}
+          onClick={() => onSelect(3, 'settings')}
+          aria-label="Settings"
+        >
+          <span>◆</span>
+          <small>Settings</small>
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ScreenFrame({
+  children,
+  touch = false,
+  brightness,
+}: {
+  children: React.ReactNode
+  touch?: boolean
+  brightness: number
+}) {
+  return (
+    <div className={`screen-bezel ${touch ? 'screen-bezel-touch' : ''}`}>
+      <div className={`screen screen-brightness-${brightness}`}>{children}</div>
+    </div>
+  )
+}
+
+function DPad({
+  pressed,
+  setPressed,
+}: {
+  pressed: Set<Control>
+  setPressed: (control: Control, value: boolean) => void
+}) {
   return (
     <div className="dpad" aria-label="Cruceta">
       <ControlButton label="▲" className="dpad-button dpad-up" active={pressed.has('up')} onChange={(v) => setPressed('up', v)} />
@@ -598,6 +843,22 @@ function ControlButton({
       {label}
     </button>
   )
+}
+
+function formatTime(date: Date) {
+  return new Intl.DateTimeFormat('es-ES', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date)
+}
+
+function formatDate(date: Date) {
+  return new Intl.DateTimeFormat('es-ES', {
+    weekday: 'short',
+    day: '2-digit',
+    month: '2-digit',
+  }).format(date)
 }
 
 export default AppNew
