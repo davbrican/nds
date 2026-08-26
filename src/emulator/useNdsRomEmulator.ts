@@ -11,7 +11,17 @@ export type NdsRomMetadata = {
   size: number
 }
 
-const EJS_DATA_PATH = 'https://cdn.emulatorjs.org/stable/data/'
+type DesmondPlayerElement = HTMLElement & {
+  loadURL?: (url: string, callback?: () => void) => void
+}
+
+type DesmondWindow = Window & {
+  __desmondAlert?: string
+  __desmondErrors?: string[]
+  __desmondFrameCount?: number
+}
+
+const DESMOND_SCRIPT = 'https://cdn.jsdelivr.net/gh/js-emulators/desmond@main/cdn/desmond.min.js'
 
 function cleanAscii(bytes: Uint8Array) {
   return new TextDecoder('ascii')
@@ -32,57 +42,28 @@ export async function readNdsMetadata(file: File): Promise<NdsRomMetadata> {
   }
 }
 
-function findGameCanvas(document: Document) {
-  const canvases = Array.from(document.querySelectorAll('canvas'))
-    .filter((canvas) => canvas.width > 1 && canvas.height > 1)
-
-  if (!canvases.length) return null
-
-  const dsLike = canvases
-    .filter((canvas) => {
-      const ratio = canvas.width / canvas.height
-      return ratio > 0.55 && ratio < 0.8
-    })
-    .sort((a, b) => b.width * b.height - a.width * a.height)
-
-  return dsLike[0] ?? canvases.sort((a, b) => b.width * b.height - a.width * a.height)[0] ?? null
-}
-
-function hasMeaningfulFrame(canvas: HTMLCanvasElement) {
-  const context = canvas.getContext('2d', { willReadFrequently: true })
-  if (!context || canvas.width < 8 || canvas.height < 8) return false
-
-  const width = canvas.width
-  const height = canvas.height
-  const points = [
-    [0.1, 0.1],
-    [0.5, 0.1],
-    [0.9, 0.1],
-    [0.25, 0.5],
-    [0.5, 0.5],
-    [0.75, 0.5],
-    [0.1, 0.9],
-    [0.5, 0.9],
-    [0.9, 0.9],
-  ]
-
-  const samples = points.map(([x, y]) => {
-    const px = Math.min(width - 1, Math.max(0, Math.floor(width * x)))
-    const py = Math.min(height - 1, Math.max(0, Math.floor(height * y)))
-    return Array.from(context.getImageData(px, py, 1, 1).data)
-  })
-
-  const first = samples[0]
-  return samples.some((sample) =>
-    sample.some((channel, index) => Math.abs(channel - first[index]) > 10),
-  )
+const keyCodes: Record<string, number> = {
+  ArrowRight: 39,
+  ArrowLeft: 37,
+  ArrowDown: 40,
+  ArrowUp: 38,
+  Shift: 16,
+  Enter: 13,
+  z: 90,
+  x: 88,
+  a: 65,
+  s: 83,
+  q: 81,
+  w: 87,
+  Backspace: 8,
 }
 
 export function useNdsRomEmulator(file: File | null) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const topCanvasRef = useRef<HTMLCanvasElement>(null)
   const bottomCanvasRef = useRef<HTMLCanvasElement>(null)
-  const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const sourceTopRef = useRef<HTMLCanvasElement | null>(null)
+  const sourceBottomRef = useRef<HTMLCanvasElement | null>(null)
   const animationFrameRef = useRef<number | null>(null)
   const [status, setStatus] = useState<EmulatorStatus>('idle')
   const [stage, setStage] = useState('Selecciona una ROM .nds')
@@ -101,17 +82,47 @@ export function useNdsRomEmulator(file: File | null) {
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     html, body { margin: 0; width: 256px; height: 384px; overflow: hidden; background: #000; }
-    #game { width: 256px; height: 384px; overflow: hidden; background: #000; }
-    canvas { image-rendering: pixelated; }
+    desmond-player { display: block; width: 256px; height: 384px; }
+    #ios-hint, #msg-layer, #rom { display: none !important; }
   </style>
 </head>
 <body data-rom-token="${romToken}">
-  <div id="game"></div>
+  <div id="ios-hint" hidden></div>
+  <div id="msg-layer" hidden><span id="msg-text"></span></div>
+  <input id="rom" type="file" hidden />
+  <desmond-player id="player"></desmond-player>
+  <script>
+    window.__desmondAlert = '';
+    window.__desmondErrors = [];
+    window.__desmondFrameCount = 0;
+    window.alert = function(message) {
+      window.__desmondAlert = String(message || 'Error del emulador');
+      console.error('[Desmond]', message);
+    };
+    window.addEventListener('error', function(event) {
+      window.__desmondErrors.push(event.message || 'Error JavaScript dentro de Desmond');
+    });
+    window.addEventListener('unhandledrejection', function(event) {
+      var reason = event.reason;
+      window.__desmondErrors.push(reason && reason.message ? reason.message : String(reason || 'Promise rechazada dentro de Desmond'));
+    });
+    (function() {
+      var original = CanvasRenderingContext2D.prototype.putImageData;
+      CanvasRenderingContext2D.prototype.putImageData = function() {
+        if (this.canvas && (this.canvas.id === 'top' || this.canvas.id === 'bottom')) {
+          window.__desmondFrameCount += 1;
+        }
+        return original.apply(this, arguments);
+      };
+    })();
+  </script>
+  <script src="${DESMOND_SCRIPT}" onerror="window.__desmondErrors.push('No se pudo descargar Desmond/DeSmuME-WASM')"></script>
 </body>
 </html>`, [romToken])
 
   useEffect(() => {
-    sourceCanvasRef.current = null
+    sourceTopRef.current = null
+    sourceBottomRef.current = null
     setError(null)
 
     if (!file) {
@@ -133,205 +144,136 @@ export function useNdsRomEmulator(file: File | null) {
     if (!file) return
 
     let disposed = false
-    let bootAttempts = 0
-    let canvasAttempts = 0
-    let firstCanvasAt = 0
-    let loaderInjected = false
-    let childErrorHandler: ((event: ErrorEvent) => void) | null = null
-    let rejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null
     let gameUrl: string | null = null
+    let loadStarted = false
+    let drawStarted = false
+    let attempts = 0
+    const startedAt = performance.now()
 
-    const bootInterval = window.setInterval(() => {
-      if (disposed || loaderInjected) return
-      bootAttempts += 1
+    const fail = (message: string, stageMessage = 'No se pudo iniciar la ROM') => {
+      if (disposed) return
+      setStatus('error')
+      setError(message)
+      setStage(stageMessage)
+    }
+
+    const draw = () => {
+      if (disposed) return
+
+      const sourceTop = sourceTopRef.current
+      const sourceBottom = sourceBottomRef.current
+      const targetTop = topCanvasRef.current
+      const targetBottom = bottomCanvasRef.current
+
+      if (sourceTop && sourceBottom && targetTop && targetBottom) {
+        if (targetTop.width !== 256) targetTop.width = 256
+        if (targetTop.height !== 192) targetTop.height = 192
+        if (targetBottom.width !== 256) targetBottom.width = 256
+        if (targetBottom.height !== 192) targetBottom.height = 192
+
+        const topContext = targetTop.getContext('2d')
+        const bottomContext = targetBottom.getContext('2d')
+
+        if (topContext && bottomContext) {
+          topContext.imageSmoothingEnabled = false
+          bottomContext.imageSmoothingEnabled = false
+          topContext.drawImage(sourceTop, 0, 0, 256, 192)
+          bottomContext.drawImage(sourceBottom, 0, 0, 256, 192)
+        }
+      }
+
+      animationFrameRef.current = window.requestAnimationFrame(draw)
+    }
+
+    const poll = window.setInterval(() => {
+      if (disposed) return
+      attempts += 1
 
       const frame = iframeRef.current
-      const frameWindow = frame?.contentWindow
+      const frameWindow = frame?.contentWindow as DesmondWindow | null
       const frameDocument = frame?.contentDocument
 
       if (!frameWindow || !frameDocument?.body) {
-        if (bootAttempts > 100) {
-          setStatus('error')
-          setError('No se pudo inicializar el contenedor del emulador.')
-          setStage('Error al crear el motor')
-          window.clearInterval(bootInterval)
-        }
+        if (attempts > 200) fail('No se pudo crear el documento interno del emulador.')
         return
       }
 
       if (frameDocument.body.dataset.romToken !== romToken) return
 
-      loaderInjected = true
-      window.clearInterval(bootInterval)
-      setStage('Cargando EmulatorJS y DeSmuME…')
-
-      childErrorHandler = (event: ErrorEvent) => {
-        if (disposed) return
-        setStatus('error')
-        setError(event.message || 'Error JavaScript dentro del emulador.')
-        setStage('El motor ha devuelto un error')
+      const errors = frameWindow.__desmondErrors ?? []
+      const alertMessage = frameWindow.__desmondAlert
+      if (alertMessage) {
+        fail(alertMessage, 'DeSmuME rechazó la Game Card')
+        window.clearInterval(poll)
+        return
+      }
+      if (errors.length) {
+        fail(errors[errors.length - 1], 'Error dentro de DeSmuME-WASM')
+        window.clearInterval(poll)
+        return
       }
 
-      rejectionHandler = (event: PromiseRejectionEvent) => {
-        if (disposed) return
-        const reason = event.reason
-        const message = reason instanceof Error ? reason.message : String(reason ?? 'Error desconocido')
-        setStatus('error')
-        setError(message)
-        setStage('El motor no ha podido arrancar')
+      const player = frameDocument.querySelector('desmond-player') as DesmondPlayerElement | null
+      const shadow = player?.shadowRoot
+      const sourceTop = shadow?.querySelector('#top') as HTMLCanvasElement | null
+      const sourceBottom = shadow?.querySelector('#bottom') as HTMLCanvasElement | null
+
+      if (sourceTop && sourceBottom) {
+        sourceTopRef.current = sourceTop
+        sourceBottomRef.current = sourceBottom
+
+        if (!drawStarted) {
+          drawStarted = true
+          setStage('DeSmuME-WASM listo. Preparando la Game Card…')
+          draw()
+        }
       }
 
-      frameWindow.addEventListener('error', childErrorHandler)
-      frameWindow.addEventListener('unhandledrejection', rejectionHandler)
+      if (!loadStarted && player && typeof player.loadURL === 'function') {
+        loadStarted = true
+        gameUrl = URL.createObjectURL(file)
+        setStage('Copiando la ROM a la memoria del emulador…')
 
-      const ejsWindow = frameWindow as Window & {
-        EJS_player?: string
-        EJS_gameName?: string
-        EJS_biosUrl?: string
-        EJS_gameUrl?: string
-        EJS_core?: string
-        EJS_pathtodata?: string
-        EJS_startOnLoaded?: boolean
-        EJS_threads?: boolean
-        EJS_volume?: number
-        EJS_language?: string
-        EJS_ready?: () => void
-      }
-
-      gameUrl = URL.createObjectURL(file)
-      ejsWindow.EJS_player = '#game'
-      ejsWindow.EJS_gameName = file.name.replace(/\.nds$/i, '')
-      ejsWindow.EJS_biosUrl = ''
-      ejsWindow.EJS_gameUrl = gameUrl
-      ejsWindow.EJS_core = 'desmume'
-      ejsWindow.EJS_pathtodata = EJS_DATA_PATH
-      ejsWindow.EJS_startOnLoaded = true
-      ejsWindow.EJS_threads = false
-      ejsWindow.EJS_volume = 0.75
-      ejsWindow.EJS_language = 'es-ES'
-      ejsWindow.EJS_ready = () => {
-        if (!disposed) setStage('DeSmuME listo. Iniciando la Game Card…')
-      }
-
-      const loader = frameDocument.createElement('script')
-      loader.src = `${EJS_DATA_PATH}loader.js`
-      loader.async = true
-      loader.onerror = () => {
-        if (disposed) return
-        setStatus('error')
-        setError('No se pudo descargar loader.js desde el CDN de EmulatorJS.')
-        setStage('Error descargando EmulatorJS')
-      }
-      frameDocument.body.appendChild(loader)
-    }, 50)
-
-    const canvasInterval = window.setInterval(() => {
-      if (disposed || !loaderInjected) return
-      canvasAttempts += 1
-
-      try {
-        const frameDocument = iframeRef.current?.contentDocument
-        if (!frameDocument) return
-
-        const source = findGameCanvas(frameDocument)
-        if (!source) {
-          if (canvasAttempts > 400) {
-            setStatus('error')
-            setError('DeSmuME no llegó a crear su framebuffer.')
-            setStage('No se ha recibido imagen del emulador')
-            window.clearInterval(canvasInterval)
-          }
+        try {
+          player.loadURL(gameUrl, () => {
+            if (!disposed) setStage('ROM transferida. Esperando al primer frame…')
+          })
+        } catch (reason) {
+          const message = reason instanceof Error ? reason.message : String(reason)
+          fail(message, 'No se pudo cargar la Game Card')
+          window.clearInterval(poll)
           return
         }
+      }
 
-        sourceCanvasRef.current = source
-        if (!firstCanvasAt) {
-          firstCanvasAt = performance.now()
-          setStage('Framebuffer detectado. Esperando vídeo…')
-        }
+      const frameCount = frameWindow.__desmondFrameCount ?? 0
+      if (frameCount >= 4) {
+        setStatus('running')
+        setStage('Ejecutando')
+        window.clearInterval(poll)
+        return
+      }
 
-        const draw = () => {
-          if (disposed) return
-
-          const currentSource = sourceCanvasRef.current
-          const topCanvas = topCanvasRef.current
-          const bottomCanvas = bottomCanvasRef.current
-
-          if (currentSource && topCanvas && bottomCanvas && currentSource.width && currentSource.height) {
-            const splitY = Math.floor(currentSource.height / 2)
-            const bottomHeight = currentSource.height - splitY
-
-            if (topCanvas.width !== 256) topCanvas.width = 256
-            if (topCanvas.height !== 192) topCanvas.height = 192
-            if (bottomCanvas.width !== 256) bottomCanvas.width = 256
-            if (bottomCanvas.height !== 192) bottomCanvas.height = 192
-
-            const topContext = topCanvas.getContext('2d', { willReadFrequently: true })
-            const bottomContext = bottomCanvas.getContext('2d', { willReadFrequently: true })
-
-            if (topContext && bottomContext) {
-              topContext.imageSmoothingEnabled = false
-              bottomContext.imageSmoothingEnabled = false
-
-              topContext.drawImage(
-                currentSource,
-                0,
-                0,
-                currentSource.width,
-                splitY,
-                0,
-                0,
-                256,
-                192,
-              )
-              bottomContext.drawImage(
-                currentSource,
-                0,
-                splitY,
-                currentSource.width,
-                bottomHeight,
-                0,
-                0,
-                256,
-                192,
-              )
-
-              const age = performance.now() - firstCanvasAt
-              if (status !== 'running' && (hasMeaningfulFrame(topCanvas) || hasMeaningfulFrame(bottomCanvas) || age > 8000)) {
-                setStatus('running')
-                setStage('Ejecutando')
-              }
-            }
-          }
-
-          animationFrameRef.current = window.requestAnimationFrame(draw)
-        }
-
-        window.clearInterval(canvasInterval)
-        draw()
-      } catch (reason) {
-        window.clearInterval(canvasInterval)
-        setStatus('error')
-        setError(reason instanceof Error ? reason.message : 'No se pudo acceder al framebuffer del emulador.')
-        setStage('Error leyendo el framebuffer')
+      if (performance.now() - startedAt > 45000) {
+        fail(
+          loadStarted
+            ? 'DeSmuME recibió la ROM pero no produjo ningún frame en 45 segundos.'
+            : 'Desmond no terminó de inicializarse. Comprueba que el navegador puede acceder a jsDelivr y js-emulators.github.io.',
+          'Tiempo de espera agotado',
+        )
+        window.clearInterval(poll)
       }
     }, 100)
 
     return () => {
       disposed = true
-      window.clearInterval(bootInterval)
-      window.clearInterval(canvasInterval)
-
-      const frameWindow = iframeRef.current?.contentWindow
-      if (frameWindow && childErrorHandler) frameWindow.removeEventListener('error', childErrorHandler)
-      if (frameWindow && rejectionHandler) frameWindow.removeEventListener('unhandledrejection', rejectionHandler)
-
+      window.clearInterval(poll)
       if (animationFrameRef.current !== null) {
         window.cancelAnimationFrame(animationFrameRef.current)
         animationFrameRef.current = null
       }
-
-      sourceCanvasRef.current = null
+      sourceTopRef.current = null
+      sourceBottomRef.current = null
       if (gameUrl) URL.revokeObjectURL(gameUrl)
     }
   }, [file, romToken])
@@ -340,6 +282,8 @@ export function useNdsRomEmulator(file: File | null) {
     const frameWindow = iframeRef.current?.contentWindow
     if (!frameWindow) return
 
+    const normalizedKey = key.length === 1 ? key.toLowerCase() : key
+    const keyCode = keyCodes[normalizedKey] ?? keyCodes[key] ?? 0
     const event = new KeyboardEvent(pressed ? 'keydown' : 'keyup', {
       key,
       code: key.length === 1 ? `Key${key.toUpperCase()}` : key,
@@ -347,22 +291,27 @@ export function useNdsRomEmulator(file: File | null) {
       cancelable: true,
     })
 
+    if (keyCode) {
+      Object.defineProperty(event, 'keyCode', { configurable: true, get: () => keyCode })
+      Object.defineProperty(event, 'which', { configurable: true, get: () => keyCode })
+    }
+
     frameWindow.dispatchEvent(event)
-    frameWindow.document.dispatchEvent(event)
   }, [])
 
   const sendTouch = useCallback((phase: TouchPhase, x: number, y: number) => {
-    const source = sourceCanvasRef.current
-    if (!source) return
+    const frameWindow = iframeRef.current?.contentWindow
+    const sourceBottom = sourceBottomRef.current
+    if (!frameWindow || !sourceBottom) return
 
-    const rect = source.getBoundingClientRect()
+    const rect = sourceBottom.getBoundingClientRect()
     const normalizedX = Math.max(0, Math.min(1, x))
     const normalizedY = Math.max(0, Math.min(1, y))
     const clientX = rect.left + normalizedX * rect.width
-    const clientY = rect.top + (0.5 + normalizedY * 0.5) * rect.height
+    const clientY = rect.top + normalizedY * rect.height
     const eventType = phase === 'down' ? 'mousedown' : phase === 'up' ? 'mouseup' : 'mousemove'
 
-    source.dispatchEvent(
+    frameWindow.dispatchEvent(
       new MouseEvent(eventType, {
         bubbles: true,
         cancelable: true,
