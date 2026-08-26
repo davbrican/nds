@@ -205,15 +205,15 @@ export function useNdsRomEmulator(file: File | null) {
     const frameWindow = iframeRef.current?.contentWindow
     if (!frameWindow) return
 
-    const event = new frameWindow.KeyboardEvent(pressed ? 'keydown' : 'keyup', {
+    const init: KeyboardEventInit = {
       key,
       code: key.length === 1 ? `Key${key.toUpperCase()}` : key,
       bubbles: true,
       cancelable: true,
-    })
+    }
 
-    frameWindow.dispatchEvent(event)
-    frameWindow.document.dispatchEvent(event)
+    frameWindow.dispatchEvent(new KeyboardEvent(pressed ? 'keydown' : 'keyup', init))
+    frameWindow.document.dispatchEvent(new KeyboardEvent(pressed ? 'keydown' : 'keyup', init))
   }, [])
 
   const sendTouch = useCallback((phase: TouchPhase, x: number, y: number) => {
@@ -228,7 +228,7 @@ export function useNdsRomEmulator(file: File | null) {
     const buttons = phase === 'up' ? 0 : 1
 
     source.dispatchEvent(
-      new frameWindow.MouseEvent(eventType, {
+      new MouseEvent(eventType, {
         bubbles: true,
         cancelable: true,
         clientX,
